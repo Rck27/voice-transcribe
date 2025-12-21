@@ -4,17 +4,27 @@ import sounddevice as sd
 import json
 import os
 from vosk import Model, KaldiRecognizer
-
 import time
+
+import serial
+
+SERIAL_PORT = "/dev/ttyUSB0"
+BAUD_RATE = 9600
 
 
 MODEL = "vosk-model-small-en-us-0.15"
+# MODEL = "vosk-model-en-us-0.22"
 model_path = "model/" + MODEL 
-SAMPLE_RATE = 48000
+SAMPLE_RATE = 16000
 buf_time = [0, 0]
 
-COMMAND = ['payload', 'camera', 'switch']
-VALUE = ['alpha', 'beta', 'delta']
+COMMAND = [
+    'payload', 'camera', 'switch'
+    ]
+VALUE = [
+    'alfa', 'charlie', 'delta', 'echo', 'foxtrot', 'hotel'
+     ]
+
 
 grammar_json = json.dumps(COMMAND + VALUE + ["[unk]"]) 
 
@@ -35,11 +45,33 @@ def audio_callback(indata, frames, time, status):
     q.put(bytes(indata))
 
 
+def serial_setup():
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)
+    print(f"serial {ser}")
+    return ser
+
+def send_serial(ser, command, value):
+    try:
+        cmd_id = COMMAND.index(command)
+        val_id = VALUE.index(value)
+
+        header = 0xAA
+        checksum = (cmd_id + val_id) & 0xFF
+
+        packet = bytearray([header, cmd_id, val_id, checksum])
+        ser.write(packet)
+        print(f"cmd {cmd_id} - {val_id} - {checksum}")
+    except:
+        print("error")
 
 def run():
-    # State tracking
+
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)
+    print(f"serial {ser}")
     buffer = {"command": None, "value": None}
-    buf_time = [0.0]  # Using a list to keep it mutable if needed
+    buf_time = 0.0
     last_state = ""   
 
     with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=4000, dtype='int16',
@@ -51,11 +83,11 @@ def run():
             data = q.get()
 
             if buffer["command"] and not buffer["value"]:
-                elapsed = time.time() - buf_time[0]
+                elapsed = time.time() - buf_time
                 if elapsed > 5.0:
                     print("\n[TIMEOUT] Command expired. Clearing buffer...")
                     buffer = {"command": None, "value": None}
-                    rec.Reset() # Clear the engine too
+                    rec.Reset()
 
             if rec.AcceptWaveform(data):
                 res_json = json.loads(rec.Result())
@@ -87,7 +119,8 @@ def run():
                 val = buffer["value"]
                 
                 print(f"\n[!] EXECUTE: {cmd.upper()} {val.upper()}")
-                
+                # ser.write()
+                send_serial(ser, cmd, val)
                 buffer = {"command": None, "value": None}
                 buf_time[0] = 0.0
                 rec.Reset() 
