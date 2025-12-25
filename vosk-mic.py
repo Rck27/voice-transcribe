@@ -42,17 +42,17 @@ def audio_callback(indata, frames, time, status):
         print(status, file=sys.stderr)
     q.put(bytes(indata))
 
-def send_serial(ser, command, key):
+def send_serial(ser, command):
     if not USE_SERIAL or ser is None:
         return
     try:
-        cmd_id = COMMAND.index(command)
-        key_id = KEY.index(key)
+        cmd_id = COMMAND.index(command) + 5 # is the channel before the first aux 4 Stick + 1 ARM channel
+        
         header = 0xAA
-        checksum = (cmd_id + key_id) & 0xFF
-        packet = bytearray([header, cmd_id, key_id, checksum])
+        checksum = (cmd_id) & 0xFF
+        packet = bytearray([header, cmd_id, checksum])
         ser.write(packet)
-        print(f"-> SENT SERIAL: {command} KEY: {key} (ID: {cmd_id})")
+        print(f"-> SENT SERIAL: {command}  (ID: {cmd_id})")
     except Exception as e:
         print(f"Serial Error: {e}")
 
@@ -118,7 +118,7 @@ def run():
             key = buffer["key"]
 
             print(f"\n[!] EXECUTE: {cmd.upper()} with KEY: {key.upper()}")
-            send_serial(ser, cmd, key)
+            send_serial(ser, cmd)
             buffer["cmd"] = None
             buffer["key"] = None
             buf_time[0] = 0.0
