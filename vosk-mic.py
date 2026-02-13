@@ -7,6 +7,37 @@ from vosk import Model, KaldiRecognizer
 import time
 import serial
 
+import socket
+import pyaudio
+import threading
+import json
+
+
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+
+def receive_transcription(sock):
+    """Reads JSONL output from the server"""
+    buffer = ""
+    while True:
+        try:
+            data = sock.recv(4096).decode("utf-8")
+            if not data: break
+            buffer += data
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                if line.strip():
+                    # Parse the JSON response
+                    response = json.loads(line)
+                    # "text" is the partial text, "is_final" tells you if segment ended
+                    print(f"[WHSPR]: {response.get('text')}")
+        except Exception as e:
+            print(f"Error receiving: {e}")
+            break
+
+
 USE_MIC = True  
 USE_SERIAL = False
 SERIAL_PORT = "/dev/ttyUSB0"
@@ -204,56 +235,73 @@ def process_data(data, active_ser):
     if not detected_text: return
 
     words = detected_text.split()
+    print(f"[VOSK] {words}")
     
-    for word in words:
-        if word == "[unk]" or word in TRAP_WORDS:
-            # send_error(active_ser)
-            print(f"[ERR] {word}")
-            continue
+    # for word in words:
+    #     if word == "[unk]" or word in TRAP_WORDS:
+    #         # send_error(active_ser)
+    #         # print(f"[ERR] {word}")
+    #         continue
 
-        if word in ACTION_MAP.keys():
-            if buffer["cmd"] != word:
-                buffer["cmd"] = word
-                last_time = time.time()
-                valid_options = list(ACTION_MAP[word].keys())
-                print(f"[CMD] {word.upper()} -> WAITING FOR: {valid_options}")
+    #     if word in ACTION_MAP.keys():
+    #         if buffer["cmd"] != word:
+    #             buffer["cmd"] = word
+    #             last_time = time.time()
+    #             valid_options = list(ACTION_MAP[word].keys())
+    #             print(f"[CMD] {word.upper()} -> WAITING FOR: {valid_options}")
 
 
-        elif word in key_words:
+    #     elif word in key_words:
             
   
-            if buffer["cmd"] is None:
-                print(f"[ERR] Ignored key '{word}' (No command armed)")
-                # send_error(active_ser)
-                return 
+    #         if buffer["cmd"] is None:
+    #             print(f"[ERR] Ignored key '{word}' (No command armed)")
+    #             # send_error(active_ser)
+    #             return 
 
 
-            valid_keys_map = ACTION_MAP[buffer["cmd"]] 
+    #         valid_keys_map = ACTION_MAP[buffer["cmd"]] 
 
-            if word in valid_keys_map:
-                # MATCH!
-                serial_id = valid_keys_map[word]
-                print(f"[KEY] {word.upper()} ACCEPTED!")
-                print(f"!!! EXECUTING: {buffer['cmd'].upper()} {word.upper()} (ID: {serial_id}) !!!")
+    #         if word in valid_keys_map:
+    #             # MATCH!
+    #             serial_id = valid_keys_map[word]
+    #             print(f"[KEY] {word.upper()} ACCEPTED!")
+    #             print(f"!!! EXECUTING: {buffer['cmd'].upper()} {word.upper()} (ID: {serial_id}) !!!")
                 
-                send_serial(active_ser, serial_id)
+    #             send_serial(active_ser, serial_id)
                 
-                # Reset
-                buffer["cmd"] = None
-                rec.Reset()
-                if USE_MIC:
-                    with q.mutex: q.queue.clear()
-                return
+    #             # Reset
+    #             buffer["cmd"] = None
+    #             rec.Reset()
+    #             if USE_MIC:
+    #                 with q.mutex: q.queue.clear()
+    #             return
             
-            else:
-                # send_error(active_ser)
-                print(f"[ERR] Key '{word}' invalid for command '{buffer['cmd']}'")
-                buffer["cmd"] = None
-                rec.Reset()
-                return
+    #         else:
+    #             # send_error(active_ser)
+    #             # print(f"[ERR] Key '{word}' invalid for command '{buffer['cmd']}'")
+    #             buffer["cmd"] = None
+    #             rec.Reset()
+    #             return
 
 
 def run():
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        client_socket.connect(("localhost", 43001))
+    except ConnectionRefusedError:
+        print("Server not running! Run simulstreaming_whisper_server.py first.")
+        return
+
+    # 2. Start Microphone
+    p = pyaudio.PyAudio()
+    stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+    
+    # 3. Start listener thread for incoming text
+    threading.Thread(target=receive_transcription, args=(client_socket,), daemon=True).start()
+
+    print("Streaming audio to Whisper...")
+
     ser = None
     if USE_SERIAL:
         try:
@@ -264,12 +312,23 @@ def run():
             print(f"Serial Error: {e}")
 
     if USE_MIC:
-        print(f"Listening... Valid Commands: {list(ACTION_MAP.keys())}")
-        with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=4000, dtype='int16',
-                               channels=1, callback=audio_callback):
-            while True:
-                data = q.get()
-                process_data(data, ser)
+        try:
+            print(f"Listening... Valid Commands: {list(ACTION_MAP.keys())}")
+            with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=4000, dtype='int16',
+                                channels=1, callback=audio_callback):
+                while True:
+                    data = q.get()
+                    process_data(data, ser)
+
+                    d = stream.read(CHUNK)
+                    client_socket.sendall(d)
+        except KeyboardInterrupt:
+            print("\nExiting...")
+        finally:
+            client_socket.close()
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
 
 if __name__ == "__main__":
     try:
